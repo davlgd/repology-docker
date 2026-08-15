@@ -1,0 +1,295 @@
+# Local Repology mirror, in containers.
+#
+#   mise tasks        list every task
+#   mise run up       build the image, start the database, import the dump
+#   mise run web-up   build and start the webapp on top of it
+#   mise run verify   check extensions and contents
+#
+#   mise run k8s-up   deploy the same images to a Kubernetes cluster
+
+[env]
+IMAGE = "repology-mirror-db"
+CONTAINER = "repology-db"
+VOLUME = "repology-pgdata"
+DB_USER = "repology"
+DB_NAME = "repology"
+DB_PASSWORD = "repology"
+
+# Loopback only: this stack is for development.
+HOST_ADDR = "127.0.0.1"
+HOST_PORT = "5432"
+
+NETWORK = "repology-net"
+WEB_IMAGE = "repology-webapp"
+WEB_CONTAINER = "repology-web"
+WEB_PORT = "8080"
+
+# ---------------------------------------------------------------------------
+# Database lifecycle
+# ---------------------------------------------------------------------------
+
+[tasks.build]
+description = "Build the PostgreSQL image with pg_trgm and libversion"
+run = 'docker build -t "$IMAGE" .'
+
+[tasks.up]
+description = "Start the database and import today's dump"
+depends = ["build"]
+run = '''
+set -eu
+
+if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+    echo "Container $CONTAINER already exists."
+    echo "  mise run start   restart it"
+    echo "  mise run clean   remove everything and start over"
+    exit 1
+fi
+
+docker volume inspect "$VOLUME" >/dev/null 2>&1 || docker volume create "$VOLUME"
+
+# The -c options also apply to the temporary server that runs the init
+# scripts, so the import benefits from them too.
+docker run -d --name "$CONTAINER" \
+    --restart unless-stopped \
+    -e POSTGRES_USER="$DB_USER" \
+    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
+    -e POSTGRES_DB="$DB_NAME" \
+    -e POSTGRES_INITDB_ARGS=--encoding=UTF8 \
+    -e REPOLOGY_SKIP_DUMP="${REPOLOGY_SKIP_DUMP:-0}" \
+    -v "$VOLUME":/var/lib/postgresql/data \
+    -p "$HOST_ADDR:$HOST_PORT":5432 \
+    --shm-size=1g \
+    "$IMAGE" \
+    postgres \
+      -c shared_buffers=1GB \
+      -c work_mem=64MB \
+      -c maintenance_work_mem=1GB \
+      -c max_wal_size=8GB \
+      -c checkpoint_timeout=30min \
+      -c synchronous_commit=off
+
+echo
+echo "Importing: ~2.3 GiB to download, ~33 GiB on disk, tens of minutes."
+echo "Follow along with: mise run logs"
+'''
+
+[tasks.start]
+description = "Restart an existing container"
+run = 'docker start "$CONTAINER"'
+
+[tasks.stop]
+description = "Stop the container, keeping the volume"
+run = 'docker stop "$CONTAINER"'
+
+[tasks.down]
+description = "Remove the container, keeping the volume"
+run = 'docker rm -f "$CONTAINER"'
+
+[tasks.clean]
+description = "Remove container AND volume — the full import has to be redone"
+run = '''
+set -eu
+docker rm -f "$CONTAINER" "$WEB_CONTAINER" 2>/dev/null || true
+docker volume rm "$VOLUME" 2>/dev/null || true
+echo "Containers and volume removed."
+'''
+
+# ---------------------------------------------------------------------------
+# Inspection
+# ---------------------------------------------------------------------------
+
+[tasks.logs]
+description = "Follow the logs, including import progress"
+run = 'docker logs -f "$CONTAINER"'
+
+[tasks.wait]
+description = "Block until the database accepts connections"
+run = '''
+set -eu
+echo "Waiting for $CONTAINER (first start includes the dump import)..."
+while true; do
+    if [ "$(docker ps -q -f "name=^${CONTAINER}$" | wc -l)" -eq 0 ]; then
+        echo "Container is not running. See: mise run logs" >&2
+        exit 1
+    fi
+    if docker exec "$CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME" -q 2>/dev/null; then
+        echo "Database ready on $HOST_ADDR:$HOST_PORT"
+        exit 0
+    fi
+    sleep 10
+done
+'''
+
+[tasks.status]
+description = "Container state and database size"
+run = '''
+set -eu
+docker ps -a -f "name=^${CONTAINER}$" --format "table {{"{{"}}.Names{{"}}"}}\t{{"{{"}}.Status{{"}}"}}\t{{"{{"}}.Ports{{"}}"}}"
+docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAX \
+    -c "SELECT 'size: ' || pg_size_pretty(pg_database_size('$DB_NAME'))" 2>/dev/null \
+    || echo "database not queryable yet"
+'''
+
+[tasks.verify]
+description = "Check the extensions and the mirror contents"
+run = '''
+set -eu
+docker exec -i "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -X -v ON_ERROR_STOP=1 <<'SQL'
+SELECT extname, extversion FROM pg_extension WHERE extname IN ('libversion', 'pg_trgm');
+SELECT version_compare2('1.10', '1.2') AS version_compare2_should_be_1;
+SELECT similarity('firefox', 'firefoxx') AS pg_trgm_similarity;
+SELECT count(*) AS projects FROM repology.metapackages;
+SELECT count(*) AS repositories FROM repology.repositories;
+SQL
+'''
+
+[tasks.psql]
+description = "Open psql against the mirror (extra arguments are forwarded)"
+run = '''
+# -t only with a real terminal, otherwise `mise run psql -- -c "..."` fails
+# with "the input device is not a TTY".
+if [ -t 0 ]; then tty_flags=-it; else tty_flags=-i; fi
+docker exec $tty_flags "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" "$@"
+'''
+
+[tasks.top]
+description = "The 20 projects packaged in the most repositories"
+run = '''
+docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -X -c "
+    SELECT effname, num_repos, num_families
+    FROM repology.metapackages
+    WHERE num_repos_nonshadow > 0
+    ORDER BY num_repos DESC
+    LIMIT 20"
+'''
+
+[tasks.dsn]
+description = "Print the DSN for repology-webapp"
+run = 'echo "postgresql://$DB_USER:$DB_PASSWORD@$HOST_ADDR:$HOST_PORT/$DB_NAME"'
+
+[tasks.refresh]
+description = "Reload today's dump into the running container"
+run = '''
+set -eu
+echo "The dump is destructive (pg_dump --clean): data will be inconsistent"
+echo "for the whole restore. Servers use the blue-green swap instead."
+docker exec -u postgres -e REPOLOGY_SKIP_DUMP=0 \
+    "$CONTAINER" /docker-entrypoint-initdb.d/20-load-dump.sh
+'''
+
+[tasks.shell]
+description = "Open a shell inside the database container"
+run = 'docker exec -it "$CONTAINER" bash'
+
+# ---------------------------------------------------------------------------
+# Webapp
+# ---------------------------------------------------------------------------
+
+[tasks.web-build]
+description = "Build repology-webapp (Rust nightly, in a container)"
+run = 'docker build -f Dockerfile.webapp -t "$WEB_IMAGE" .'
+
+[tasks.web-up]
+description = "Start the webapp against the database"
+depends = ["web-build"]
+run = '''
+set -eu
+
+# Both containers need a shared network so the webapp can resolve the
+# database container name in its DSN.
+docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK"
+docker network connect "$NETWORK" "$CONTAINER" 2>/dev/null || true
+
+docker rm -f "$WEB_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$WEB_CONTAINER" \
+    --restart unless-stopped \
+    --network "$NETWORK" \
+    -p "$HOST_ADDR:$WEB_PORT":8080 \
+    "$WEB_IMAGE" \
+    --dsn "postgresql://$DB_USER:$DB_PASSWORD@$CONTAINER/$DB_NAME" \
+    --listen 0.0.0.0:8080
+
+echo "Webapp on http://$HOST_ADDR:$WEB_PORT/"
+'''
+
+[tasks.web-logs]
+description = "Follow the webapp logs"
+run = 'docker logs -f "$WEB_CONTAINER"'
+
+[tasks.web-check]
+description = "Check that the webapp serves data from the database"
+run = '''
+set -eu
+base="http://$HOST_ADDR:$WEB_PORT"
+
+for path in / /projects/ /repositories/statistics /api/v1/project/firefox; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' "$base$path")"
+    echo "$code  $path"
+    [ "$code" = "200" ] || { echo "unexpected response on $path" >&2; exit 1; }
+done
+
+echo
+echo "API sample:"
+curl -s "$base/api/v1/project/firefox" | head -c 300
+echo
+'''
+
+[tasks.web-down]
+description = "Stop and remove the webapp"
+run = 'docker rm -f "$WEB_CONTAINER"'
+
+# ---------------------------------------------------------------------------
+# Kubernetes deployment
+# ---------------------------------------------------------------------------
+
+[tasks.k8s-images]
+description = "Build and push the linux/amd64 images the cluster pulls"
+run = '''
+set -eu
+: "${REGISTRY:?set REGISTRY, e.g. ghcr.io/yourname}"
+docker buildx build --platform linux/amd64 -t "$REGISTRY/repology-mirror-db:latest" --push .
+docker buildx build --platform linux/amd64 -f Dockerfile.webapp -t "$REGISTRY/repology-webapp:latest" --push .
+'''
+
+[tasks.k8s-up]
+description = "Create the namespace, the database password and apply the manifests"
+run = '''
+set -eu
+export KUBECONFIG="${KUBECONFIG:-$PWD/kubeconfig.yaml}"
+kubectl apply -f k8s/00-namespace.yaml
+# Created once and kept: regenerating it would lock the webapp out of a
+# database whose password was set at first start.
+kubectl -n repology get secret repology-db >/dev/null 2>&1 || \
+    kubectl -n repology create secret generic repology-db \
+        --from-literal=password="$(openssl rand -base64 24 | tr -d /+= | head -c 32)"
+kubectl apply -f k8s/
+echo
+echo "Importing: ~30 minutes. The database pod stays 0/1 until the data is complete."
+echo "Follow along with: mise run k8s-status"
+'''
+
+[tasks.k8s-status]
+description = "Pod state, import progress and load balancer address"
+run = '''
+set -eu
+export KUBECONFIG="${KUBECONFIG:-$PWD/kubeconfig.yaml}"
+kubectl -n repology get pods -o wide
+echo
+kubectl -n repology get svc repology-webapp
+echo
+db=$(kubectl -n repology get pod -l app=repology-db -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$db" ]; then
+    kubectl -n repology exec "$db" -- psql -U repology -d repology -tAX \
+        -c "SELECT count(*) || ' projects, ' || pg_size_pretty(pg_database_size('repology')) FROM repology.metapackages" \
+        2>/dev/null || kubectl -n repology logs "$db" --tail=3
+    # Which build is live, since the tag alone never changes.
+    kubectl -n repology get pod "$db" -o jsonpath='{.status.containerStatuses[0].imageID}{"\n"}'
+fi
+'''
+
+[tasks.k8s-down]
+description = "Remove everything, including the database contents"
+run = '''
+export KUBECONFIG="${KUBECONFIG:-$PWD/kubeconfig.yaml}"
+kubectl delete -f k8s/ --ignore-not-found
+'''

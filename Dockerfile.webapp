@@ -1,0 +1,51 @@
+# repology-webapp, the Rust frontend. Built in a container because it needs
+# Rust nightly and the libversion C library.
+
+FROM rustlang/rust:nightly-bookworm AS builder
+
+ARG LIBVERSION_REF=3.0.4
+# repology-rs publishes no tag or release, so this tracks the branch: each
+# build takes whatever is current. Pass a commit to freeze one.
+ARG REPOLOGY_RS_REF=master
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake git pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Installed twice: into the builder for the libversion crate to link against,
+# and into /staging for the runtime image.
+RUN git clone --depth 1 --branch "${LIBVERSION_REF}" \
+        https://github.com/repology/libversion.git /src/libversion \
+    && cmake -S /src/libversion -B /src/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+    && cmake --build /src/build -j "$(nproc)" \
+    && cmake --install /src/build \
+    && DESTDIR=/staging cmake --install /src/build \
+    && ldconfig
+
+# Fetch rather than clone, so REPOLOGY_RS_REF accepts a commit as well as a
+# branch name: --branch rejects a bare SHA.
+WORKDIR /build
+RUN git init -q . \
+    && git remote add origin https://github.com/repology/repology-rs.git \
+    && git fetch -q --depth 1 origin "${REPOLOGY_RS_REF}" \
+    && git checkout -q FETCH_HEAD
+
+RUN cargo build --release -p repology-webapp
+
+FROM debian:bookworm-slim
+
+# fonts-dejavu-core is required: the webapp measures SVG badge text at startup
+# and panics when DejaVuSans.ttf is missing.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /staging/ /
+COPY --from=builder /build/target/release/repology-webapp /usr/local/bin/
+RUN ldconfig
+
+EXPOSE 8080
+ENTRYPOINT ["repology-webapp"]

@@ -1,0 +1,114 @@
+# PostgreSQL with pg_trgm and libversion, importing the Repology dump on first
+# start.
+#
+# A StatefulSet rather than a Deployment: the volume claim is part of the
+# object, keeps its identity across restarts, and is not deleted with the pod.
+# Losing it would mean a fresh 30-minute import.
+#
+# The 25 GiB of data belong on a CSI volume, not in the image. Image layers are
+# unpacked onto the node's own disk — which no StorageClass can extend — and a
+# dataset shipped that way evicts the pod before it ever starts.
+apiVersion: v1
+kind: Service
+metadata:
+  name: repology-db
+  namespace: repology
+spec:
+  selector:
+    app: repology-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: repology-db
+  namespace: repology
+spec:
+  serviceName: repology-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: repology-db
+  template:
+    metadata:
+      labels:
+        app: repology-db
+    spec:
+      containers:
+        - name: postgres
+          image: ghcr.io/davlgd/repology-mirror-db:latest
+          args:
+            - postgres
+            - -c
+            - shared_buffers=2GB
+            - -c
+            - work_mem=64MB
+            # Large enough to build the dump's indexes in memory instead of
+            # spilling temporary files onto the volume.
+            - -c
+            - maintenance_work_mem=1GB
+            - -c
+            - max_wal_size=4GB
+            - -c
+            - checkpoint_timeout=30min
+            # A mirror is rebuilt from a dump: losing recent commits to a
+            # crash costs nothing and the restore is markedly faster.
+            - -c
+            - synchronous_commit=off
+          env:
+            - name: POSTGRES_USER
+              value: repology
+            - name: POSTGRES_DB
+              value: repology
+            - name: POSTGRES_INITDB_ARGS
+              value: --encoding=UTF8
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: repology-db
+                  key: password
+            # The official image refuses to initialise a non-empty directory,
+            # and a fresh volume carries lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          # -h 127.0.0.1 forces TCP, and that is the whole point: during the
+          # import the entrypoint runs a temporary server bound to the unix
+          # socket only. Without -h, pg_isready reaches that temporary server
+          # and reports success while the data is still loading, so the
+          # Service would advertise an endpoint that refuses connections.
+          readinessProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -U, repology, -d, repology]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              memory: 8Gi
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        # PostgreSQL needs more than the default 64 MiB of shared memory.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            # 25 GiB of data plus WAL, with room for the dataset to grow.
+            # The storage class allows expansion if it ever gets tight.
+            storage: 50Gi

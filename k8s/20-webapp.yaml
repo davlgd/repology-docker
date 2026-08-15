@@ -1,0 +1,86 @@
+# repology-webapp, the Rust frontend, exposed through the cluster load
+# balancer. Its image follows its own release cycle: the database image is
+# replaced nightly by its author, this one only when you rebuild it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: repology-webapp
+  namespace: repology
+spec:
+  type: LoadBalancer
+  selector:
+    app: repology-webapp
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: repology-webapp
+  namespace: repology
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: repology-webapp
+  template:
+    metadata:
+      labels:
+        app: repology-webapp
+    spec:
+      # The webapp exits when the database is unreachable at startup, which
+      # would mean crash-looping while the database image is pulled. Waiting
+      # here keeps the pod status honest instead.
+      #
+      # A plain TCP check, not pg_isready: the Service only publishes an
+      # endpoint once the database pod passes its own readiness probe, so a
+      # connection that succeeds here already proves PostgreSQL accepts
+      # queries. Carrying a PostgreSQL client just to learn that would cost
+      # 450 MB of image for nothing.
+      initContainers:
+        - name: wait-for-database
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - until nc -z repology-db 5432; do sleep 5; done
+      containers:
+        - name: webapp
+          image: ghcr.io/davlgd/repology-webapp:latest
+          # Kubernetes expands $(VAR) in args, so the password stays in the
+          # Secret and never appears in the manifest. The role has to be named:
+          # unlike libpq, sqlx does not fall back to the system user and would
+          # try to connect as "anonymous". Naming it repology also selects the
+          # schema of the same name, through the default search_path.
+          args:
+            - --dsn
+            - postgresql://repology:$(DB_PASSWORD)@repology-db/repology
+            - --listen
+            - 0.0.0.0:8080
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: repology-db
+                  key: password
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              memory: 1Gi

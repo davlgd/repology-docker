@@ -1,0 +1,37 @@
+# Kubernetes lets any pod reach any other by default. The database holds no
+# secret beyond its own contents, but it has no reason to answer anything other
+# than the webapp, so this closes it off — defence in depth rather than the
+# only lock, since the password in the Secret still applies.
+#
+# Enforced here by Cilium. On a cluster whose CNI ignores NetworkPolicy this
+# object is silently decorative, so check before relying on it:
+#
+#   kubectl -n kube-system get ds | grep -E 'cilium|calico|antrea|kube-router'
+#
+# Note it governs the pod network only: `kubectl exec` and `kubectl
+# port-forward` reach the pod through the kubelet and bypass it entirely.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: repology-db
+  namespace: repology
+spec:
+  podSelector:
+    matchLabels:
+      app: repology-db
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: repology-webapp
+      ports:
+        - protocol: TCP
+          port: 5432
+  # Egress stays open, unlike the ingress side: this database downloads the
+  # dump itself on first start and on every refresh, so it needs DNS and
+  # outbound HTTPS to dumps.repology.org.
+  egress:
+    - {}
