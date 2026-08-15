@@ -44,8 +44,13 @@ claimed through the StatefulSet's `volumeClaimTemplates`, so it keeps its
 identity across restarts and is **not** deleted with the pod: restarting the
 database does not trigger a re-import.
 
-50 GiB for 25 GiB of data plus WAL. If the dataset outgrows it, a storage
-class with `ALLOWVOLUMEEXPANSION` lets you raise the claim in place.
+80 GiB for 25 GiB of data plus WAL, because the nightly refresh builds a
+second copy beside the live one before swapping. If it ever gets tight, a
+storage class with `ALLOWVOLUMEEXPANSION` raises the claim in place — the
+filesystem grows online, without restarting PostgreSQL. Note that
+`volumeClaimTemplates` is immutable on an existing StatefulSet, so changing it
+in the manifest means recreating the object with `--cascade=orphan`, which
+leaves the running pod and its volume alone.
 
 **A CSI driver does not make node disk a non-issue.** It provisions volumes
 *mounted into* pods; container images are unpacked by containerd onto the
@@ -62,6 +67,17 @@ then blocks rescheduling until kubelet reclaims space. An `emptyDir` fails the
 same way, for the same reason. Sizing the claim is not optional here.
 
 ## Restricting the database
+
+The webapp connects as `repology_ro`, which may only read — plus insert into
+the one table the "report a problem" form writes to. The owner role that
+imports the dump is a superuser and stays out of the webapp's reach; the
+`repology-db` Secret therefore holds two passwords, and `mise run k8s-up`
+generates both.
+
+`pg_default_acl` lives inside a database and a fresh one inherits nothing, so
+the nightly refresh reapplies the grants to the database it builds, then
+verifies `repology_ro` can actually read it before swapping. Skipping that
+check once produced a database that passed every count and still served 502s.
 
 `30-networkpolicy.yaml` limits ingress to pods labelled `app=repology-webapp`
 on 5432, on top of the password held in the `repology-db` Secret. Egress stays

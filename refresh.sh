@@ -30,6 +30,14 @@ cleanup_failed() {
     psql -d postgres -c "DROP DATABASE IF EXISTS $NEXT" >/dev/null 2>&1 || true
 }
 
+# Inherited from the database container's own environment, this would make the
+# import a no-op and the swap replace live data with an empty database. The
+# verification below catches it, but far less legibly than saying so here.
+if [ "${REPOLOGY_SKIP_DUMP:-0}" = "1" ]; then
+    log "refusing to run with REPOLOGY_SKIP_DUMP=1"
+    exit 1
+fi
+
 log "=== Repology mirror refresh ==="
 trap cleanup_failed ERR
 
@@ -64,6 +72,16 @@ if [ "$exts" -ne 2 ]; then
     log "aborting: extensions missing from $NEXT"
     false
 fi
+
+# A database can be perfectly valid and still unusable: the counts above pass
+# while the reader has no rights on it, and the site serves errors from a
+# mirror that looks healthy. Check as the role that actually serves traffic.
+if [ -n "${REPOLOGY_RO_PASSWORD:-}" ]; then
+    PGPASSWORD="$REPOLOGY_RO_PASSWORD" psql -tAX -U repology_ro -d "$NEXT" \
+        -c 'SELECT count(*) FROM repology.metapackages' >/dev/null
+    log "verified: repology_ro can read $NEXT"
+fi
+
 log "verified: $projects projects, extensions in place"
 
 trap - ERR
@@ -71,8 +89,14 @@ trap - ERR
 # Renaming requires zero connections to either database. Terminating the
 # clients is enough: a pooled reader reconnects by name and lands on the new
 # data by itself, which is the whole window of downtime.
+#
+# client backend only: pg_stat_activity also lists parallel workers, and
+# killing one of those is an abnormal exit as far as the postmaster is
+# concerned — it restarts the whole cluster into crash recovery.
 psql -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-                     WHERE datname IN ('$DB', '$NEXT') AND pid <> pg_backend_pid()" >/dev/null
+                     WHERE datname IN ('$DB', '$NEXT')
+                       AND backend_type = 'client backend'
+                       AND pid <> pg_backend_pid()" >/dev/null
 psql -d postgres -c "ALTER DATABASE $DB RENAME TO $OLD" >/dev/null
 psql -d postgres -c "ALTER DATABASE $NEXT RENAME TO $DB" >/dev/null
 log "swap done"

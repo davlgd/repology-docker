@@ -74,6 +74,21 @@ by a superuser. They must live in `public`, because the restore runs with an
 empty `search_path` and references extension objects as `public.*` — for
 instance `public.gin_trgm_ops` in the GIN indexes.
 
+**The webapp does not connect as the owner.** `POSTGRES_USER` creates a
+PostgreSQL *superuser*, and handing that to a web frontend would let a
+compromise drop the mirror or run commands on the host through `COPY ... FROM
+PROGRAM`. Set `REPOLOGY_RO_PASSWORD` and the image also creates `repology_ro`,
+which may only `SELECT` — plus `INSERT` into `repology.reports`, the single
+table the "report a problem" form writes to. Leave the variable unset and
+nothing is created.
+
+Two details make it work. `ALTER ROLE repology_ro SET search_path = repology,
+public` is mandatory: the default is `"$user", public`, so a role of that name
+would look for a schema of that name and find nothing. And the grants are
+applied **twice** — before the dump, where `ALTER DEFAULT PRIVILEGES` covers
+everything the restore is about to create, and after it, because default
+privileges describe object types and can never name one table.
+
 **`libversion` is packaged almost nowhere.** Repology lists the PostgreSQL
 extension as `pgsql:libversion`, present only in openSUSE among the ~650
 repositories it tracks — Debian, Ubuntu and Alpine have neither it nor the C

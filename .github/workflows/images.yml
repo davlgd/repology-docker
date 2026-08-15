@@ -7,6 +7,7 @@ on:
       - Dockerfile
       - Dockerfile.webapp
       - initdb/**
+      - refresh.sh
       - .github/workflows/images.yml
   schedule:
     # The webapp follows repology-rs, which has no releases; the database
@@ -14,11 +15,6 @@ on:
     - cron: "30 5 * * *"
     - cron: "0 4 1 * *"
   workflow_dispatch:
-    inputs:
-      force:
-        description: Rebuild the webapp even if repology-rs has not moved
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -33,7 +29,8 @@ jobs:
 
       # A scheduled run rebuilds only when upstream moved: the published image
       # records the commit it was built from, so comparing the two costs one
-      # registry lookup instead of a 20-minute Rust build.
+      # registry lookup instead of a 20-minute Rust build. A push or a manual
+      # dispatch always rebuilds.
       - name: Decide whether to build
         id: check
         env:
