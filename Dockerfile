@@ -42,3 +42,7 @@ COPY --from=builder /staging/ /
 RUN ldconfig
 
 COPY initdb/ /docker-entrypoint-initdb.d/
+
+# Reloads the dump into a sibling database and swaps by rename, for a cron
+# entry or a Kubernetes CronJob. It reuses the import script above.
+COPY refresh.sh /usr/local/bin/repology-refresh.sh

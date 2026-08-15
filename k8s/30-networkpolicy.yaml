@@ -27,6 +27,12 @@ spec:
         - podSelector:
             matchLabels:
               app: repology-webapp
+        # The nightly refresh connects as an ordinary client, so it needs
+        # naming here too — otherwise it fails at 05:00 with a timeout that
+        # looks nothing like a firewall rule.
+        - podSelector:
+            matchLabels:
+              app: repology-refresh
       ports:
         - protocol: TCP
           port: 5432

@@ -109,6 +109,7 @@ spec:
         accessModes: [ReadWriteOnce]
         resources:
           requests:
-            # 25 GiB of data plus WAL, with room for the dataset to grow.
-            # The storage class allows expansion if it ever gets tight.
-            storage: 50Gi
+            # 25 GiB of data, plus WAL, plus the sibling database the nightly
+            # refresh builds beside it before the swap — that second copy is
+            # what makes 50 GiB too tight.
+            storage: 80Gi

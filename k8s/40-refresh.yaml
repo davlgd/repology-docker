@@ -1,0 +1,111 @@
+# Nothing here refreshes on its own otherwise: the database imports once
+# against an empty volume, and the webapp pod keeps the image it started with
+# however often the registry is updated. Both would silently go stale.
+#
+# Upstream publishes a new dump daily around 04:00 UTC.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: repology-refresh
+  namespace: repology
+spec:
+  schedule: "0 5 * * *"
+  # A second run would collide with the first over the sibling database.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # Well past the 20-40 minutes an import takes: a hung run must not still
+      # be holding the lock when tomorrow's fires.
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels:
+            app: repology-refresh
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: refresh
+              image: ghcr.io/davlgd/repology-mirror-db:latest
+              command: [repology-refresh.sh]
+              env:
+                - name: PGHOST
+                  value: repology-db
+                - name: PGUSER
+                  value: repology
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: repology-db
+                      key: password
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 256Mi
+                limits:
+                  memory: 1Gi
+---
+# `rollout restart` recreates the pod, which then pulls the current image
+# because the Deployment sets imagePullPolicy: Always. With one replica the
+# rollout surges before terminating, so the site stays up.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: repology-rollout
+  namespace: repology
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: repology-rollout
+  namespace: repology
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [repology-webapp]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: repology-rollout
+  namespace: repology
+subjects:
+  - kind: ServiceAccount
+    name: repology-rollout
+roleRef:
+  kind: Role
+  name: repology-rollout
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: repology-webapp-update
+  namespace: repology
+spec:
+  # After the image workflow has had time to publish a new build.
+  schedule: "30 6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: repology-rollout
+          containers:
+            - name: kubectl
+              image: registry.k8s.io/kubectl:v1.36.1
+              args: [rollout, restart, deployment/repology-webapp]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi

@@ -104,21 +104,43 @@ Three ways around it, in rough order of preference:
    in an existing `repology-webapp` and `libversion.so*` never runs the
    toolchain under emulation.
 
-## Refreshing the data
+## Staying current
 
-There is no timer here. Upstream publishes a new dump daily around 04:00 UTC.
+Neither half updates itself without `40-refresh.yaml`. The database imports
+once against an empty volume and the entrypoint then skips its init scripts
+for good; the webapp pod keeps whatever image it started with, however often
+the registry moves. Both go stale silently, which is the worst way to fail.
 
-Because the volume persists, the entrypoint's init scripts do **not** run
-again on restart — the import only happens against an empty volume. Refreshing
-means replaying the dump into the existing database:
+Two CronJobs fix that. Upstream publishes a new dump daily around 04:00 UTC.
+
+**`repology-refresh`, 05:00 UTC.** Replaying a `pg_dump --clean` into the live
+database would leave it inconsistent for the whole restore, so the job builds a
+sibling database instead, checks it holds at least 1.5 M projects with both
+extensions, and only then swaps by rename. A failed check drops the sibling and
+leaves the live database untouched.
+
+The rename needs zero connections, so the job terminates the webapp's sessions
+first; its pool reconnects by name and lands on the new data by itself. That
+reconnection is the entire downtime — no rollout, and therefore no RBAC.
+
+This is why the claim is 80 GiB rather than 50: for the length of the import
+the volume holds both copies.
+
+**`repology-webapp-update`, 06:30 UTC**, after the image workflow has had time
+to publish. `kubectl rollout restart` recreates the pod, which pulls the
+current image because the Deployment sets `imagePullPolicy: Always` — that
+setting alone changes nothing, since it only applies when a pod is created. A
+ServiceAccount grants `get` and `patch` on that one Deployment by name, and
+nothing else. With a single replica the rollout surges before terminating, so
+the site stays up.
+
+Either can be run early:
 
 ```sh
-kubectl -n repology exec repology-db-0 -- \
-    sh -c 'REPOLOGY_SKIP_DUMP=0 /docker-entrypoint-initdb.d/20-load-dump.sh'
+kubectl -n repology create job --from=cronjob/repology-refresh refresh-now
 ```
 
-That is destructive for the duration of the restore (`pg_dump --clean`), so
-the webapp serves inconsistent data for 20-40 minutes. Avoiding that means a
-blue-green swap: import into a second claim, then rename and restart the
-webapp, for a few seconds of downtime instead. Worth the extra volume only if
-this deployment is one people actually rely on.
+The refresh pod is an ordinary client of the database, so it is named in the
+NetworkPolicy alongside the webapp. Dropping that label is the kind of change
+that surfaces at 05:00 as a connection timeout looking nothing like a firewall
+rule.
