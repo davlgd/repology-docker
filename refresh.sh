@@ -41,10 +41,18 @@ psql -d "$NEXT" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" >
 psql -d "$NEXT" -c "CREATE EXTENSION IF NOT EXISTS libversion WITH SCHEMA public" >/dev/null
 log "created $NEXT with its extensions"
 
+# Default privileges live in the database, so the fresh one inherits none of
+# them: without this the webapp loses its access at the swap.
+POSTGRES_USER="$OWNER" /docker-entrypoint-initdb.d/15-readonly.sh "$NEXT"
+
 # The import script is driven entirely by these two variables, so it loads the
 # sibling without knowing it is being reused.
 POSTGRES_USER="$OWNER" POSTGRES_DB="$NEXT" \
     /docker-entrypoint-initdb.d/20-load-dump.sh
+
+# Again, now that the tables exist: default privileges cover object types, so
+# the INSERT the report form needs could not be granted before the import.
+POSTGRES_USER="$OWNER" /docker-entrypoint-initdb.d/15-readonly.sh "$NEXT"
 
 projects="$(psql -tAX -d "$NEXT" -c 'SELECT count(*) FROM repology.metapackages')"
 if [ "$projects" -lt "$MIN_PROJECTS" ]; then

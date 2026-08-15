@@ -49,13 +49,17 @@ spec:
         - name: webapp
           image: ghcr.io/davlgd/repology-webapp:latest
           # Kubernetes expands $(VAR) in args, so the password stays in the
-          # Secret and never appears in the manifest. The role has to be named:
-          # unlike libpq, sqlx does not fall back to the system user and would
-          # try to connect as "anonymous". Naming it repology also selects the
-          # schema of the same name, through the default search_path.
+          # Secret and never appears in the manifest. The role has to be named
+          # explicitly: unlike libpq, sqlx does not fall back to the system
+          # user and would try to connect as "anonymous".
+          #
+          # repology_ro may only SELECT, plus INSERT into the one table the
+          # "report a problem" form writes to. The owner role is a superuser —
+          # handing that to a web frontend would let a compromise drop the
+          # mirror or run commands through COPY ... FROM PROGRAM.
           args:
             - --dsn
-            - postgresql://repology:$(DB_PASSWORD)@repology-db/repology
+            - postgresql://repology_ro:$(DB_PASSWORD)@repology-db/repology
             - --listen
             - 0.0.0.0:8080
           env:
@@ -63,7 +67,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: repology-db
-                  key: password
+                  key: ro-password
           ports:
             - containerPort: 8080
           readinessProbe:

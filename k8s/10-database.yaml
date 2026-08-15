@@ -69,6 +69,13 @@ spec:
                 secretKeyRef:
                   name: repology-db
                   key: password
+            # Creates the read-only role the webapp connects as. Unset, the
+            # image skips it and the webapp falls back to the owner.
+            - name: REPOLOGY_RO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: repology-db
+                  key: ro-password
             # The official image refuses to initialise a non-empty directory,
             # and a fresh volume carries lost+found.
             - name: PGDATA

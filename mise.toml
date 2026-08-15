@@ -261,7 +261,8 @@ kubectl apply -f k8s/00-namespace.yaml
 # database whose password was set at first start.
 kubectl -n repology get secret repology-db >/dev/null 2>&1 || \
     kubectl -n repology create secret generic repology-db \
-        --from-literal=password="$(openssl rand -base64 24 | tr -d /+= | head -c 32)"
+        --from-literal=password="$(openssl rand -base64 24 | tr -d /+= | head -c 32)" \
+        --from-literal=ro-password="$(openssl rand -base64 24 | tr -d /+= | head -c 32)"
 kubectl apply -f k8s/
 echo
 echo "Importing: ~30 minutes. The database pod stays 0/1 until the data is complete."

@@ -40,6 +40,13 @@ spec:
                     secretKeyRef:
                       name: repology-db
                       key: password
+                # The sibling database inherits no default privileges, so the
+                # refresh reapplies them before importing.
+                - name: REPOLOGY_RO_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: repology-db
+                      key: ro-password
               resources:
                 requests:
                   cpu: 500m
