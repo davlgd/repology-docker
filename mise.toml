@@ -266,10 +266,14 @@ export KUBECONFIG="${KUBECONFIG:-$PWD/kubeconfig.yaml}"
 kubectl apply -f k8s/00-namespace.yaml
 # Created once and kept: regenerating it would lock the webapp out of a
 # database whose password was set at first start.
+# tr -dc, not tr -d: deleting the complement also drops openssl's trailing
+# newline. Kept as -d, a stripped +/ leaves under 32 characters and head -c 32
+# swallows the newline into the password — psql then sends it and sqlx trims
+# it, so the webapp alone fails to authenticate.
 kubectl -n repology get secret repology-db >/dev/null 2>&1 || \
     kubectl -n repology create secret generic repology-db \
-        --from-literal=password="$(openssl rand -base64 24 | tr -d /+= | head -c 32)" \
-        --from-literal=ro-password="$(openssl rand -base64 24 | tr -d /+= | head -c 32)"
+        --from-literal=password="$(openssl rand -base64 32 | tr -dc A-Za-z0-9 | head -c 32)" \
+        --from-literal=ro-password="$(openssl rand -base64 32 | tr -dc A-Za-z0-9 | head -c 32)"
 kubectl apply -f k8s/
 echo
 echo "Importing: ~30 minutes. The database pod stays 0/1 until the data is complete."
