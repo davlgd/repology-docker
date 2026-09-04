@@ -1,7 +1,7 @@
 # PostgreSQL with pg_trgm and libversion, loading the Repology dump on first
 # start. Pinned to the version the dumps are produced with: a dump restores
 # onto an equal or newer server, never an older one.
-ARG PG_IMAGE=postgres:17.10-bookworm
+ARG PG_IMAGE=postgres:17.11-bookworm
 
 FROM ${PG_IMAGE} AS builder
 

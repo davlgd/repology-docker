@@ -23,7 +23,7 @@ if [ "${REPOLOGY_SKIP_DUMP:-0}" = "1" ]; then
 fi
 
 # Not -latest.sql.zst: the dated name carries the PostgreSQL version
-# (...pg17.10.sql.zst), which lets us check compatibility before downloading
+# (...pg17.11.sql.zst), which lets us check compatibility before downloading
 # 2.3 GiB.
 if [ -z "$DUMP_URL" ]; then
     echo "==> Resolving newest dump on ${DUMPS_BASE}/"

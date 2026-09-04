@@ -57,7 +57,7 @@ docker buildx imagetools inspect ghcr.io/davlgd/repology-webapp:latest \
 ```
 
 **The database** pins everything it compiles — `libversion` 3.0.4, the
-extension 2.0.1, PostgreSQL 17.10 — so it is rebuilt monthly for base image
+extension 2.0.1, PostgreSQL 17.11 — so it is rebuilt monthly for base image
 updates, and on any push touching its sources.
 
 Both are **linux/amd64 only**: `rustc` segfaults under QEMU, and the runners
@@ -96,7 +96,7 @@ library. Both are therefore built from pinned sources in a builder stage.
 
 **PostgreSQL version, one way only.** A dump restores onto the version it was
 made with or a newer one, never an older one. The version is encoded in the
-file name (`…pg17.10.sql.zst`), which is why `initdb/20-load-dump.sh` resolves
+file name (`…pg17.11.sql.zst`), which is why `initdb/20-load-dump.sh` resolves
 the *dated* dump rather than `-latest.sql.zst`: it compares against `SHOW
 server_version` and fails before downloading 2.3 GiB.
 
