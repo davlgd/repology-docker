@@ -45,10 +45,19 @@ jobs:
           done
           echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      # The runner's stock podman storage cannot be mounted from inside
-      # bootc-image-builder ("mount: /run/osbuild/containers/storage: permission
-      # denied"): plain overlay, set up before anything lands in it, can. This is what
-      # osbuild's own action does (osbuild/bootc-image-builder#446).
+      # Ubuntu ties /usr/bin/bwrap to an AppArmor profile (bwrap-userns-restrict, then
+      # unpriv_bwrap) that strips its capabilities, and it applies inside containers
+      # too: osbuild sandboxes every stage with bwrap, so its mounts fail with
+      # "permission denied" (dmesg: apparmor="DENIED" profile="unpriv_bwrap").
+      - name: Let bwrap keep its capabilities
+        run: |
+          if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Plain overlay storage for root's podman, set up before anything lands in it:
+      # what osbuild's own action does on GitHub runners (osbuild/bootc-image-builder#446).
       - name: Configure podman storage
         run: |
           sudo rm -rf /var/lib/containers/storage
@@ -72,10 +81,8 @@ jobs:
       - name: Build the qcow2
         run: |
           mkdir output
-          # Ubuntu's AppArmor confines even privileged containers, and refuses the
-          # mounts osbuild makes inside.
           sudo podman run --rm --privileged --pull=newer \
-            --security-opt label=type:unconfined_t --security-opt apparmor=unconfined \
+            --security-opt label=type:unconfined_t \
             -v ./output:/output \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             quay.io/centos-bootc/bootc-image-builder:latest \
