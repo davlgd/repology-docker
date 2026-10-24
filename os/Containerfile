@@ -1,0 +1,33 @@
+# Bootable OS image for a Repology mirror VM (bootc): Fedora, cloud-init, the QEMU
+# guest agent, and the two images of this repository run as podman quadlets, with the
+# daily refresh on a timer. Nothing to configure after boot beyond what cloud-init
+# carries (user, SSH key, address).
+#
+#   podman build -t repology-os os/
+#
+# bootc-image-builder turns it into a qcow2 for the first install (see the OS workflow);
+# afterwards the guest follows the image in the registry with bootc upgrade.
+FROM quay.io/fedora/fedora-bootc:44
+
+# The application images, pinned by digest in CI so that each OS image carries the
+# exact database and webapp it was built with.
+ARG DB_IMAGE=ghcr.io/davlgd/repology-mirror-db:latest
+ARG WEBAPP_IMAGE=ghcr.io/davlgd/repology-webapp:latest
+
+RUN dnf -y install cloud-init qemu-guest-agent && dnf clean all
+COPY cloud-init.cfg /etc/cloud/cloud.cfg.d/90-bootc.cfg
+
+COPY repology.network repology-pgdata.volume repology-db.container repology-webapp.container \
+     /usr/share/containers/systemd/
+COPY repology-refresh.service repology-refresh.timer /usr/lib/systemd/system/
+COPY update-window.conf /usr/lib/systemd/system/bootc-fetch-apply-updates.timer.d/10-window.conf
+
+# No logically bound images (/usr/lib/bootc/bound-images.d): bootc-image-builder cannot
+# resolve them ("read-only file system" on the container storage). Podman pulls both
+# images when their units first start instead.
+RUN sed -i "s|@DB_IMAGE@|${DB_IMAGE}|" /usr/share/containers/systemd/repology-db.container \
+ && sed -i "s|@WEBAPP_IMAGE@|${WEBAPP_IMAGE}|" /usr/share/containers/systemd/repology-webapp.container \
+ && ! grep -r '@[A-Z_]*_IMAGE@' /usr/share/containers/systemd/ \
+ && systemctl enable repology-refresh.timer
+
+RUN bootc container lint

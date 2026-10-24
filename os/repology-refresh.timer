@@ -1,0 +1,12 @@
+# Upstream publishes around 04:10 UTC.
+[Unit]
+Description=Daily Repology mirror refresh
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 UTC
+# Catch up a run missed while the VM was off.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

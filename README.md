@@ -2,14 +2,15 @@
 
 Container images for a private [Repology](https://repology.org) mirror —
 package versions across ~650 distributions — plus the Kubernetes manifests to
-run them.
+run them, and a bootable OS image to run them on a VM.
 
-Two images, built from source and published to GitHub Container Registry:
+Built from source and published to GitHub Container Registry:
 
 | Image | Contents |
 |---|---|
 | `ghcr.io/davlgd/repology-mirror-db` | PostgreSQL 17 with `pg_trgm` and `libversion`, loading the daily dump on first start |
 | `ghcr.io/davlgd/repology-webapp` | `repology-webapp`, the official Rust frontend |
+| `ghcr.io/davlgd/repology-os` | Fedora bootc running both as podman quadlets, refreshed daily; also a qcow2 |
 
 The dataset is roughly **2.1 million projects**, **33 GiB on disk**, and
 **2.3 GiB to download**. A first import takes 20 to 40 minutes.
@@ -40,6 +41,32 @@ The database is a `StatefulSet` on a `PersistentVolumeClaim`, the webapp a
 database reachable from the webapp alone. Prerequisites and the reasons behind
 each choice: [k8s/README.md](k8s/README.md).
 
+## Virtual machine
+
+`os/` builds a [bootc](https://bootc-dev.github.io/bootc/) image: Fedora 44,
+cloud-init, the QEMU guest agent, and both images above run as podman
+quadlets, with the refresh on a daily timer. The database port is never
+published; the webapp answers on port 8080 of the guest.
+
+The OS workflow also turns it into a qcow2, attached to the rolling `os-latest`
+release. Import it as a VM disk of 80 GiB or more and give the VM a cloud-init
+user, SSH key and address — on Proxmox VE, the stock cloud-init drive:
+
+```sh
+qm set <vmid> --scsi0 <storage>:0,import-from=/path/to/repology-os.x86_64.qcow2
+qm disk resize <vmid> scsi0 80G
+qm set <vmid> --ide2 <storage>:cloudinit --ciuser core --sshkeys key.pub \
+    --ipconfig0 ip=192.0.2.10/24,gw=192.0.2.1 --agent enabled=1
+```
+
+On first boot the root partition grows to the disk, the database imports the
+newest dump (20-40 minutes), and the webapp starts once it is healthy. From
+then on the guest follows `ghcr.io/davlgd/repology-os:latest`:
+`bootc-fetch-apply-updates.timer` stages a new image daily at 10:00 UTC, clear
+of the 05:00 refresh, and reboots into it; `bootc rollback` returns to the
+previous one. Database and webapp change only through such an update, since
+each OS image pins them by digest.
+
 ## How the images are rebuilt
 
 `.github/workflows/images.yml` publishes both.
@@ -62,6 +89,13 @@ updates, and on any push touching its sources.
 
 Both are **linux/amd64 only**: `rustc` segfaults under QEMU, and the runners
 are amd64 anyway. `workflow_dispatch` triggers either by hand.
+
+**The OS** (`.github/workflows/os.yml`) is rebuilt weekly and on any push
+touching `os/`. It resolves the current database and webapp images to their
+digests, builds the OS image with them, makes the qcow2 with
+[bootc-image-builder](https://github.com/osbuild/bootc-image-builder), and
+only then pushes the image and replaces the `os-latest` release. The qcow2 is
+about 1.2 GiB, under the 2 GiB GitHub accepts for a release asset.
 
 ## Things worth knowing
 
@@ -123,3 +157,17 @@ persists, so on restart the entrypoint finds a valid `PGDATA` and skips the
 init scripts — including the import — for good. Check the project count, which
 should be around 2.1 million; anything well below means starting over from an
 empty volume.
+
+**bootc-image-builder cannot resolve logically bound images.** Listing the
+application images in `/usr/lib/bootc/bound-images.d`, so that bootc pulls
+them with each update, makes the qcow2 build fail with *read-only file system*
+on the container storage. Podman pulls them when their units first start.
+
+**cloud-init must not resize `/` on bootc.** `/` is a composefs mount;
+`bootc-generic-growpart` grows the real partition, and cloud-init's own
+attempt only marks the run degraded, hence `os/cloud-init.cfg`.
+
+**The webapp must not hang off `multi-user.target`.** It waits for the
+database to be healthy, which on first boot means the whole import, and a
+target waits for the units it wants: the boot would stay "starting" for most of
+an hour. It is wanted by `repology-db.service` instead.

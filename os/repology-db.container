@@ -1,0 +1,30 @@
+# The image imports the newest dump on its first start against an empty volume
+# (20-40 minutes); afterwards repology-refresh.timer takes over.
+[Unit]
+Description=Repology mirror database
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=repology-db
+Image=@DB_IMAGE@
+Network=repology.network
+Volume=repology-pgdata.volume:/var/lib/postgresql/data
+# PostgreSQL needs more than the default 64 MiB of shared memory.
+ShmSize=1g
+# Never published: the webapp is the only client, over the private network.
+Environment=POSTGRES_USER=repology POSTGRES_DB=repology POSTGRES_PASSWORD=repology
+Exec=postgres -c shared_buffers=2GB -c work_mem=64MB -c maintenance_work_mem=1GB -c max_wal_size=8GB -c checkpoint_timeout=30min -c synchronous_commit=off
+# -h forces TCP: during the import the entrypoint runs a temporary server on the
+# unix socket only, which a socket probe would report as ready.
+HealthCmd=pg_isready -h 127.0.0.1 -U repology -d repology
+HealthInterval=30s
+HealthStartPeriod=3h
+
+[Service]
+Restart=always
+# Room for the first image pull.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

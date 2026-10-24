@@ -1,0 +1,12 @@
+[Unit]
+Description=Repology mirror refresh (blue-green swap)
+Requires=repology-db.service
+After=repology-db.service
+
+[Service]
+Type=oneshot
+# The database image's own refresh script, the one the Kubernetes CronJob runs: it
+# loads the new dump into a sibling database, verifies it, and swaps it in by rename.
+# Over the container's unix socket, as the owner.
+ExecStart=/usr/bin/podman exec -e PGUSER=repology repology-db repology-refresh.sh
+TimeoutStartSec=4h

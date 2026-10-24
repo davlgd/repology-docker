@@ -1,0 +1,105 @@
+name: OS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - os/**
+      - .github/workflows/os.yml
+  schedule:
+    # Weekly, for Fedora updates and whatever the application workflow published since.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  # contents: the rolling release carrying the qcow2.
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/repology-os
+  QCOW2: repology-os.x86_64.qcow2
+
+jobs:
+  os:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The base image, the OS image and bootc-image-builder's build tree side by side
+      # outgrow the runner's free space as it comes.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # Each OS image pins the application images it ships, by digest: a guest only
+      # ever changes database or webapp through an OS update, with its rollback.
+      - name: Resolve the application images
+        id: apps
+        run: |
+          for pair in db:repology-mirror-db webapp:repology-webapp; do
+            ref=ghcr.io/${{ github.repository_owner }}/${pair#*:}
+            digest=$(docker buildx imagetools inspect "$ref:latest" --format '{{ .Manifest.Digest }}')
+            echo "${pair%%:*}=$ref@$digest" | tee -a "$GITHUB_OUTPUT"
+          done
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      # Into root's storage, which is where bootc-image-builder reads the image from.
+      - name: Build the OS image
+        run: |
+          sudo podman build \
+            --build-arg DB_IMAGE=${{ steps.apps.outputs.db }} \
+            --build-arg WEBAPP_IMAGE=${{ steps.apps.outputs.webapp }} \
+            --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            -t "$IMAGE:latest" -t "$IMAGE:${{ steps.apps.outputs.date }}" \
+            os/
+
+      # Built before anything is pushed, so a failure here publishes nothing. The image
+      # name is the one guests installed from this disk will upgrade from.
+      - name: Build the qcow2
+        run: |
+          mkdir output
+          sudo podman run --rm --privileged --pull=newer \
+            --security-opt label=type:unconfined_t \
+            -v ./output:/output \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type qcow2 --rootfs xfs "$IMAGE:latest"
+          sudo mv output/qcow2/disk.qcow2 "$QCOW2"
+          sudo chown "$(id -u):$(id -g)" "$QCOW2"
+          sha256sum "$QCOW2" > "$QCOW2.sha256"
+          ls -lh "$QCOW2"
+          # GitHub refuses release assets over 2 GiB: compress, or publish elsewhere.
+          [ "$(stat -c %s "$QCOW2")" -lt 2147483648 ] || { echo "::error::$QCOW2 exceeds 2 GiB"; exit 1; }
+
+      - name: Push the OS image
+        id: push
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          sudo podman push --digestfile digest "$IMAGE:latest"
+          sudo podman push "$IMAGE:${{ steps.apps.outputs.date }}"
+          echo "digest=$(cat digest)" | tee -a "$GITHUB_OUTPUT"
+
+      # One rolling release, so the download URL never changes:
+      # releases/download/os-latest/repology-os.x86_64.qcow2
+      - name: Publish the qcow2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          Bootable disk for a Repology mirror VM, built from \`os/\` at ${{ github.sha }}.
+
+          | | |
+          |---|---|
+          | OS image | \`$IMAGE@${{ steps.push.outputs.digest }}\` (also \`:${{ steps.apps.outputs.date }}\`) |
+          | Database | \`${{ steps.apps.outputs.db }}\` |
+          | Webapp | \`${{ steps.apps.outputs.webapp }}\` |
+
+          Import it as the VM's disk, give it 80 GiB or more and a cloud-init user, SSH key and address; the guest then follows \`$IMAGE:latest\`. Checksum: \`$QCOW2.sha256\`.
+          EOF
+          gh release delete os-latest --cleanup-tag --yes 2>/dev/null || true
+          gh release create os-latest "$QCOW2" "$QCOW2.sha256" \
+            --target "${{ github.sha }}" --prerelease --latest=false \
+            --title "Repology OS ${{ steps.apps.outputs.date }}" --notes-file notes.md
