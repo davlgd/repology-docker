@@ -45,6 +45,17 @@ jobs:
           done
           echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
+      # The runner's stock podman storage cannot be mounted from inside
+      # bootc-image-builder ("mount: /run/osbuild/containers/storage: permission
+      # denied"): plain overlay, set up before anything lands in it, can. This is what
+      # osbuild's own action does (osbuild/bootc-image-builder#446).
+      - name: Configure podman storage
+        run: |
+          sudo rm -rf /var/lib/containers/storage
+          sudo mkdir -p /etc/containers
+          printf '[storage]\ndriver = "overlay"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' \
+            | sudo tee /etc/containers/storage.conf
+
       # Into root's storage, which is where bootc-image-builder reads the image from.
       - name: Build the OS image
         run: |
