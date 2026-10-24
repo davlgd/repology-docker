@@ -169,5 +169,7 @@ attempt only marks the run degraded, hence `os/cloud-init.cfg`.
 
 **The webapp must not hang off `multi-user.target`.** It waits for the
 database to be healthy, which on first boot means the whole import, and a
-target waits for the units it wants: the boot would stay "starting" for most of
-an hour. It is wanted by `repology-db.service` instead.
+target waits for the units it wants: `multi-user.target` and cloud-init's final
+stage would wait most of an hour. It is wanted by `repology-db.service`
+instead; its start job still lasts that long, so `systemctl is-system-running`
+reports "starting" until the webapp is up.

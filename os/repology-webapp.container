@@ -23,6 +23,7 @@ RestartSec=10
 
 [Install]
 # Pulled in by the database rather than by multi-user.target: a target waits for the
-# units it wants, and this one waits out the whole first import, so the boot would
-# stay "starting" (cloud-final included) for most of an hour.
+# units it wants, and this one waits out the whole first import, which would hold
+# multi-user.target and cloud-init's final stage back for most of an hour. Its start
+# job still runs that long, so `systemctl is-system-running` says "starting" until then.
 WantedBy=repology-db.service
