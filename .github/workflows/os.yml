@@ -72,8 +72,10 @@ jobs:
       - name: Build the qcow2
         run: |
           mkdir output
+          # Ubuntu's AppArmor confines even privileged containers, and refuses the
+          # mounts osbuild makes inside.
           sudo podman run --rm --privileged --pull=newer \
-            --security-opt label=type:unconfined_t \
+            --security-opt label=type:unconfined_t --security-opt apparmor=unconfined \
             -v ./output:/output \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             quay.io/centos-bootc/bootc-image-builder:latest \
@@ -84,6 +86,10 @@ jobs:
           ls -lh "$QCOW2"
           # GitHub refuses release assets over 2 GiB: compress, or publish elsewhere.
           [ "$(stat -c %s "$QCOW2")" -lt 2147483648 ] || { echo "::error::$QCOW2 exceeds 2 GiB"; exit 1; }
+
+      - name: Kernel log
+        if: failure()
+        run: sudo dmesg | tail -40
 
       - name: Push the OS image
         id: push
